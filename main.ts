@@ -10,6 +10,22 @@ const DEFAULT_SETTINGS: FileTimeSettings = {
 	absoluteFormat: 'YYYY-MM-DD HH:mm:ss'
 }
 
+/**
+ * 提取公共的时间计算逻辑，保证状态栏和模态框显示完全同步
+ */
+function getRelativeTimeString(timestamp: number): string {
+	const now = Date.now();
+	const diff = now - timestamp;
+	
+	// 如果在 1 分钟内，返回精确的秒数
+	if (diff < 60000 && diff >= 0) {
+		const seconds = Math.floor(diff / 1000);
+		return seconds === 0 ? '刚刚' : `${seconds} 秒前`;
+	}
+	// 超过 1 分钟，使用 moment.js 的默认相对时间格式
+	return moment(timestamp).fromNow();
+}
+
 export default class FileTimePlugin extends Plugin {
 	settings: FileTimeSettings;
 	statusBarEl: HTMLElement;
@@ -71,23 +87,13 @@ export default class FileTimePlugin extends Plugin {
 		}
 
 		const mtime = file.stat.mtime;
-		const now = Date.now();
-		const diff = now - mtime;
-
 		let displayText = '';
 
 		if (this.settings.displayMode === 'absolute') {
 			displayText = `修改于: ${moment(mtime).format(this.settings.absoluteFormat)}`;
 		} else {
-			// 相对时间模式
-			if (diff < 60000) { 
-				// 1分钟内，实时显示秒数
-				const seconds = Math.floor(diff / 1000);
-				displayText = `修改于: ${seconds === 0 ? '刚刚' : seconds + ' 秒前'}`;
-			} else {
-				// 超过1分钟使用 moment.js 的相对时间
-				displayText = `修改于: ${moment(mtime).fromNow()}`;
-			}
+			// 相对时间模式，调用公共方法
+			displayText = `修改于: ${getRelativeTimeString(mtime)}`;
 		}
 
 		this.statusBarEl.setText(displayText);
@@ -100,6 +106,12 @@ export default class FileTimePlugin extends Plugin {
 class StatsModal extends Modal {
 	file: TFile;
 	settings: FileTimeSettings;
+	
+	// 保存 DOM 元素的引用以便每秒更新
+	mtimeEl: HTMLElement;
+	ctimeEl: HTMLElement;
+	// 模态框专属的定时器
+	refreshTimer: number;
 
 	constructor(app: App, file: TFile, settings: FileTimeSettings) {
 		super(app);
@@ -114,22 +126,23 @@ class StatsModal extends Modal {
 		contentEl.createEl('h2', { text: '📊 当前文件与仓库统计' });
 
 		// --- 1. 当前文件时间统计 ---
-		const ctime = this.file.stat.ctime;
-		const mtime = this.file.stat.mtime;
-		const format = this.settings.absoluteFormat;
-
 		contentEl.createEl('h3', { text: `📄 ${this.file.name}` });
 		
 		const fileStatsDiv = contentEl.createDiv({ cls: 'file-time-stats-container' });
 		fileStatsDiv.style.marginBottom = '20px';
 		fileStatsDiv.style.lineHeight = '1.8';
 
-		fileStatsDiv.createEl('div', { 
-			text: `🕒 创建时间: ${moment(ctime).format(format)} (${moment(ctime).fromNow()})` 
-		});
-		fileStatsDiv.createEl('div', { 
-			text: `✏️ 修改时间: ${moment(mtime).format(format)} (${moment(mtime).fromNow()})` 
-		});
+		// 创建空的占位元素
+		this.ctimeEl = fileStatsDiv.createDiv();
+		this.mtimeEl = fileStatsDiv.createDiv();
+
+		// 立即执行一次渲染
+		this.updateModalTimes();
+
+		// 启动模态框定时器，每秒刷新一次时间（让里面的倒计时跟状态栏完全同步跳动）
+		this.refreshTimer = window.setInterval(() => {
+			this.updateModalTimes();
+		}, 1000);
 
 		contentEl.createEl('hr');
 
@@ -143,7 +156,6 @@ class StatsModal extends Modal {
 
 		allFiles.forEach(f => {
 			if (f instanceof TFolder) {
-				// 排除根目录自身
 				if (f.path !== '/') totalFolders++;
 			} else if (f instanceof TFile) {
 				totalFiles++;
@@ -159,7 +171,22 @@ class StatsModal extends Modal {
 		vaultStatsDiv.createEl('div', { text: `📎 全部文件总数 (含附件): ${totalFiles}` });
 	}
 
+	// 更新模态框内时间的具体逻辑
+	updateModalTimes() {
+		const ctime = this.file.stat.ctime;
+		const mtime = this.file.stat.mtime;
+		const format = this.settings.absoluteFormat;
+
+		// 调用与状态栏相同的 getRelativeTimeString 保证100%同步
+		this.ctimeEl.innerText = `🕒 创建时间: ${moment(ctime).format(format)} (${getRelativeTimeString(ctime)})`;
+		this.mtimeEl.innerText = `✏️ 修改时间: ${moment(mtime).format(format)} (${getRelativeTimeString(mtime)})`;
+	}
+
 	onClose() {
+		// 模态框关闭时务必清理定时器，防止内存泄漏
+		if (this.refreshTimer) {
+			window.clearInterval(this.refreshTimer);
+		}
 		const { contentEl } = this;
 		contentEl.empty();
 	}
