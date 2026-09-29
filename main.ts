@@ -1,88 +1,54 @@
 import { App, Modal, Plugin, PluginSettingTab, Setting, TFile, TFolder, moment } from 'obsidian';
 
-interface FileTimePluginSettings {
-    timeFormat: string;
+interface FileTimeSettings {
+    dateFormat: string;
     displayMode: 'relative' | 'absolute';
 }
 
-const DEFAULT_SETTINGS: FileTimePluginSettings = {
-    timeFormat: 'YYYY-MM-DD HH:mm:ss',
+const DEFAULT_SETTINGS: FileTimeSettings = {
+    dateFormat: 'YYYY-MM-DD HH:mm:ss',
     displayMode: 'relative'
 };
 
 export default class FileTimePlugin extends Plugin {
-    settings: FileTimePluginSettings;
+    settings: FileTimeSettings;
     statusBarItemEl: HTMLElement;
-    intervalId: number | null = null;
-    currentFile: TFile | null = null;
 
     async onload() {
         await this.loadSettings();
 
-        // 1. 添加状态栏项目
+        // 1. 创建状态栏项
         this.statusBarItemEl = this.addStatusBarItem();
         this.statusBarItemEl.addClass('mod-clickable');
-        this.statusBarItemEl.setAttribute('aria-label', '点击查看文件详情与仓库统计');
-
-        // 点击状态栏弹出模态框
+        
+        // 绑定点击事件，弹出模态框
         this.statusBarItemEl.onClickEvent(() => {
-            if (this.currentFile) {
-                new FileStatsModal(this.app, this.currentFile, this.settings).open();
+            const activeFile = this.app.workspace.getActiveFile();
+            if (activeFile) {
+                new FileStatsModal(this.app, activeFile, this.settings).open();
             }
         });
 
-        // 2. 监听文件切换与修改事件
-        this.registerEvent(
-            this.app.workspace.on('file-open', (file) => {
-                this.currentFile = file;
+        // 2. 注册每秒更新定时器（由插件自动管理生命周期，禁用时自动注销）
+        this.registerInterval(
+            window.setInterval(() => {
                 this.updateStatusBar();
-            })
+            }, 1000)
         );
 
-        this.registerEvent(
-            this.app.vault.on('modify', (file) => {
-                if (file === this.currentFile) {
-                    this.updateStatusBar();
-                }
-            })
-        );
+        // 3. 监听文件切换与文件修改事件
+        this.registerEvent(this.app.workspace.on('file-open', () => this.updateStatusBar()));
+        this.registerEvent(this.app.vault.on('modify', () => this.updateStatusBar()));
 
-        // 3. 启动每秒更新一次的定时器（用于秒级相对时间更新）
-        this.intervalId = window.setInterval(() => {
-            if (this.currentFile && this.settings.displayMode === 'relative') {
-                this.updateStatusBar();
-            }
-        }, 1000);
-
-        // 4. 注册设置标签页
+        // 4. 注册设置面板
         this.addSettingTab(new FileTimeSettingTab(this.app, this));
 
-        // 初始化当前激活的文件
-        this.currentFile = this.app.workspace.getActiveFile();
+        // 初始更新
         this.updateStatusBar();
     }
 
     onunload() {
-        if (this.intervalId !== null) {
-            window.clearInterval(this.intervalId);
-        }
-    }
-
-    // 更新状态栏文本
-    updateStatusBar() {
-        if (!this.currentFile) {
-            this.statusBarItemEl.setText('');
-            return;
-        }
-
-        const mtime = this.currentFile.stat.mtime;
-        if (this.settings.displayMode === 'relative') {
-            const relTime = getDetailedRelativeTime(mtime);
-            this.statusBarItemEl.setText(`修改于: ${relTime}`);
-        } else {
-            const absTime = moment(mtime).format(this.settings.timeFormat);
-            this.statusBarItemEl.setText(`修改于: ${absTime}`);
-        }
+        // 清理在 unload 时会自动完成
     }
 
     async loadSettings() {
@@ -93,34 +59,63 @@ export default class FileTimePlugin extends Plugin {
         await this.saveData(this.settings);
         this.updateStatusBar();
     }
+
+    // 更新状态栏文本
+    updateStatusBar() {
+        const activeFile = this.app.workspace.getActiveFile();
+        if (!activeFile) {
+            this.statusBarItemEl.setText('');
+            return;
+        }
+
+        const mtime = activeFile.stat.mtime;
+        if (this.settings.displayMode === 'relative') {
+            const relTime = getExactRelativeTime(mtime);
+            this.statusBarItemEl.setText(`修改于: ${relTime}`);
+        } else {
+            const absTime = moment(mtime).format(this.settings.dateFormat);
+            this.statusBarItemEl.setText(`修改于: ${absTime}`);
+        }
+    }
 }
 
-// ==================== 辅助函数：计算高精度相对时间 ====================
-function getDetailedRelativeTime(timestamp: number): string {
-    const now = Date.now();
-    const diffSec = Math.max(0, Math.floor((now - timestamp) / 1000));
-
-    if (diffSec < 60) {
-        return `${diffSec}秒前`;
+/**
+ * 计算精确到秒的相对时间字符串
+ */
+function getExactRelativeTime(timestamp: number): string {
+    const diffSeconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+    
+    if (diffSeconds < 60) {
+        return `${diffSeconds}秒前`;
     }
-    const diffMin = Math.floor(diffSec / 60);
-    if (diffMin < 60) {
-        return `${diffMin}分钟前`;
+    const diffMinutes = Math.floor(diffSeconds / 60);
+    if (diffMinutes < 60) {
+        return `${diffMinutes}分钟前`;
     }
-    const diffHour = Math.floor(diffMin / 60);
-    if (diffHour < 24) {
-        return `${diffHour}小时前`;
+    const diffHours = Math.floor(diffMinutes / 60);
+    if (diffHours < 24) {
+        return `${diffHours}小时前`;
     }
-    const diffDay = Math.floor(diffHour / 24);
-    return `${diffDay}天前`;
+    const diffDays = Math.floor(diffHours / 24);
+    if (diffDays < 30) {
+        return `${diffDays}天前`;
+    }
+    const diffMonths = Math.floor(diffDays / 30);
+    if (diffMonths < 12) {
+        return `${diffMonths}个月前`;
+    }
+    const diffYears = Math.floor(diffDays / 365);
+    return `${diffYears}年前`;
 }
 
-// ==================== 模态框 (Modal) ====================
+/**
+ * 详细信息模态框
+ */
 class FileStatsModal extends Modal {
     file: TFile;
-    settings: FileTimePluginSettings;
+    settings: FileTimeSettings;
 
-    constructor(app: App, file: TFile, settings: FileTimePluginSettings) {
+    constructor(app: App, file: TFile, settings: FileTimeSettings) {
         super(app);
         this.file = file;
         this.settings = settings;
@@ -130,54 +125,73 @@ class FileStatsModal extends Modal {
         const { contentEl } = this;
         contentEl.empty();
 
-        contentEl.createEl('h2', { text: '📄 文件信息与仓库统计' });
+        // 标题
+        contentEl.createEl('h2', { text: '📄 笔记统计详情' });
 
-        // --- 当前文件信息 ---
-        const fileInfoSection = contentEl.createDiv({ cls: 'file-info-section' });
-        fileInfoSection.createEl('h3', { text: '当前文件' });
+        // --- 1. 当前文件信息 ---
+        const fileSection = contentEl.createEl('div', { cls: 'file-stats-section' });
 
-        const ul = fileInfoSection.createEl('ul');
-        
         // 文件名
-        ul.createEl('li', { text: `文件名: ${this.file.name}` });
+        const nameP = fileSection.createEl('p');
+        nameP.createEl('strong', { text: '文件名：' });
+        nameP.appendText(this.file.name);
 
         // 创建时间
         const ctime = this.file.stat.ctime;
-        const ctimeAbs = moment(ctime).format(this.settings.timeFormat);
-        const ctimeRel = getDetailedRelativeTime(ctime);
-        ul.createEl('li', { text: `创建时间: ${ctimeRel} (${ctimeAbs})` });
+        const ctimeAbs = moment(ctime).format(this.settings.dateFormat);
+        const ctimeRel = getExactRelativeTime(ctime);
+        const ctimeP = fileSection.createEl('p');
+        ctimeP.createEl('strong', { text: '创建时间：' });
+        ctimeP.appendText(`${ctimeAbs} (${ctimeRel})`);
 
         // 修改时间
         const mtime = this.file.stat.mtime;
-        const mtimeAbs = moment(mtime).format(this.settings.timeFormat);
-        const mtimeRel = getDetailedRelativeTime(mtime);
-        ul.createEl('li', { text: `修改时间: ${mtimeRel} (${mtimeAbs})` });
+        const mtimeAbs = moment(mtime).format(this.settings.dateFormat);
+        const mtimeRel = getExactRelativeTime(mtime);
+        const mtimeP = fileSection.createEl('p');
+        mtimeP.createEl('strong', { text: '修改时间：' });
+        mtimeP.appendText(`${mtimeAbs} (${mtimeRel})`);
 
+        // 分割线
         contentEl.createEl('hr');
 
-        // --- 仓库总览统计 ---
-        const vaultStatsSection = contentEl.createDiv({ cls: 'vault-stats-section' });
-        vaultStatsSection.createEl('h3', { text: '仓库统计' });
+        // --- 2. 仓库全量统计 ---
+        contentEl.createEl('h3', { text: '📊 仓库总览' });
 
-        // 统计数据计算
+        let totalFiles = 0;
+        let totalFolders = 0;
+        let totalMdNotes = 0;
+
+        // 获取仓库所有加载的文件
         const allItems = this.app.vault.getAllLoadedFiles();
-        let folderCount = 0;
         for (const item of allItems) {
             if (item instanceof TFolder) {
-                folderCount++;
+                // 排除根目录自身
+                if (!item.isRoot()) {
+                    totalFolders++;
+                }
+            } else if (item instanceof TFile) {
+                totalFiles++;
+                if (item.extension.toLowerCase() === 'md') {
+                    totalMdNotes++;
+                }
             }
         }
-        // 排除根路径 '/' 文件夹
-        folderCount = Math.max(0, folderCount - 1);
 
-        const totalFiles = this.app.vault.getFiles().length;
-        const mdFiles = this.app.vault.getMarkdownFiles().length;
+        // 按照需求严格顺序展示：文件总数 -> 文件夹总数 -> Markdown 笔记总数
+        const statsList = contentEl.createEl('ul', { cls: 'vault-stats-list' });
+        
+        const liFiles = statsList.createEl('li');
+        liFiles.createEl('strong', { text: '文件总数：' });
+        liFiles.appendText(`${totalFiles} 个`);
 
-        // 按指定顺序展示：文件总数、文件夹总数、Markdown 笔记总数
-        const statsList = vaultStatsSection.createEl('ol');
-        statsList.createEl('li', { text: `总文件数（含附件等）: ${totalFiles}` });
-        statsList.createEl('li', { text: `文件夹总数: ${folderCount}` });
-        statsList.createEl('li', { text: `Markdown 笔记数: ${mdFiles}` });
+        const liFolders = statsList.createEl('li');
+        liFolders.createEl('strong', { text: '文件夹总数：' });
+        liFolders.appendText(`${totalFolders} 个`);
+
+        const liMd = statsList.createEl('li');
+        liMd.createEl('strong', { text: 'Markdown 笔记总数：' });
+        liMd.appendText(`${totalMdNotes} 篇`);
     }
 
     onClose() {
@@ -186,7 +200,9 @@ class FileStatsModal extends Modal {
     }
 }
 
-// ==================== 设置面板 (Settings Tab) ====================
+/**
+ * 设置选项页
+ */
 class FileTimeSettingTab extends PluginSettingTab {
     plugin: FileTimePlugin;
 
@@ -198,33 +214,36 @@ class FileTimeSettingTab extends PluginSettingTab {
     display(): void {
         const { containerEl } = this;
         containerEl.empty();
-        containerEl.createEl('h2', { text: '文件时间状态栏设置' });
 
-        // 显示模式切换
+        containerEl.createEl('h2', { text: '文件时间状态栏插件设置' });
+
+        // 设置项：显示模式（相对时间 vs 绝对时间）
         new Setting(containerEl)
             .setName('状态栏显示模式')
-            .setDesc('选择状态栏默认展示相对时间（每秒更新）还是绝对时间')
-            .addDropdown(drop => drop
-                .addOption('relative', '相对时间 (默认，如：12秒前)')
-                .addOption('absolute', '绝对时间 (固定格式)')
-                .setValue(this.plugin.settings.displayMode)
-                .onChange(async (value: 'relative' | 'absolute') => {
-                    this.plugin.settings.displayMode = value;
-                    await this.plugin.saveSettings();
-                })
-            );
+            .setDesc('选择在状态栏默认显示的时间格式（默认为相对时间，每秒刷新）')
+            .addDropdown(dropdown => {
+                dropdown
+                    .addOption('relative', '相对时间 (例如: 5秒前)')
+                    .addOption('absolute', '绝对时间 (具体时间)')
+                    .setValue(this.plugin.settings.displayMode)
+                    .onChange(async (value: 'relative' | 'absolute') => {
+                        this.plugin.settings.displayMode = value;
+                        await this.plugin.saveSettings();
+                    });
+            });
 
-        // 时间格式自定义
+        // 设置项：自定义时间格式
         new Setting(containerEl)
             .setName('绝对时间格式')
-            .setDesc('采用 Moment.js 格式规范（例如：YYYY-MM-DD HH:mm:ss）')
-            .addText(text => text
-                .setPlaceholder('YYYY-MM-DD HH:mm:ss')
-                .setValue(this.plugin.settings.timeFormat)
-                .onChange(async (value) => {
-                    this.plugin.settings.timeFormat = value.trim() || 'YYYY-MM-DD HH:mm:ss';
-                    await this.plugin.saveSettings();
-                })
-            );
+            .setDesc('自定义绝对日期的输出格式（基于 Moment.js 语法规则）')
+            .addText(text => {
+                text
+                    .setPlaceholder('YYYY-MM-DD HH:mm:ss')
+                    .setValue(this.plugin.settings.dateFormat)
+                    .onChange(async (value) => {
+                        this.plugin.settings.dateFormat = value.trim() || 'YYYY-MM-DD HH:mm:ss';
+                        await this.plugin.saveSettings();
+                    });
+            });
     }
 }
